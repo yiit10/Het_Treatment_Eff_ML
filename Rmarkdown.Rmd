@@ -1,0 +1,173 @@
+---
+title: "LMU SoSe23 Machine Learning in Econometrics Final"
+author: "Yiğit Kavak 12625736"
+date: "7/8/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, warning = FALSE, echo = FALSE}
+library(data.table)
+library(hdm)
+library(ggplot2)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+
+## Data
+
+In the dataset, we will manipulate the variables or define new variables. For example, instead of looking at the weekly wages directly, we will look for wage per hour to evaluate the effect of the policy in the US. 
+
+
+- change_hourly_wage, which will be the difference between hourly wage in 2010 and 2005. However, in here, the issue of change in the employment will be considered in the following chapters according to the analysis.
+
+
+Another subject is, We see that for some of the workers (such as id 18), even though they are employed in 2005 and 2010, their experience and tenure are not changing. Since we will use the changes in experience and possible changes in the employer as independent variables, as we will build up some new dummies/variables, we will exclude some of the workers according to their job situation. 
+
+- change_exper, which will be the difference between experience in 2010 and 2005.
+
+- change_tenure, which will be the difference between tenure in 2010 and 2005.
+
+
+In some cases, we also see that the tenure (years with the current employer) is more than exper (years of work experience). Since we don't know how this data is collected or generated, we will ignore the irrational situations and continue our analysis with including all of the workers.
+
+
+```{r data, echo = FALSE}
+db <- as.data.table(read.csv("C:/Users/furka/OneDrive - metu.edu.tr/Belgeler/LMU/term2/Machine Learning/genderinequality.csv"))
+
+db[, hourly_wage := wage/hours]
+db_wage_2005 <- db[year == "2005",]
+db_wage_2010 <- db[year == "2010",]
+db_wage_2005 <- db_wage_2005[, c("id","wage","hours","emp","exper","tenure","married","urban","hourly_wage")]
+colnames(db_wage_2005) <- c("id","wage_2005","hours_2005","emp_2005","exper_2005","tenure_2005","married_2005","urban_2005","hourly_wage_2005")
+db_wage_2010 <- db_wage_2010[, c("id","wage","hours","emp","treat","female","IQ","KWW","educ","exper","tenure","age","married","black","south","urban","sibs","brthord","meduc","feduc","hourly_wage")]
+colnames(db_wage_2010) <- c("id","wage_2010","hours_2010","emp_2010","treat","female","IQ","KWW","educ","exper_2010","tenure_2010","age","married_2010","black","south","urban_2010","sibs","brthord","meduc","feduc","hourly_wage_2010")
+db2 <- merge(db_wage_2005, db_wage_2010, by = "id")
+db2[, change_hourly_wage := hourly_wage_2010 - hourly_wage_2005]
+db2[, change_wage := wage_2010 - wage_2005]
+db2[, change_exper := exper_2010 - exper_2005]
+db2[, change_tenure := tenure_2010 - tenure_2005]
+db2[, change_emp := emp_2010 - emp_2005]
+
+
+
+
+```
+
+# Treatment effect on change in gender wage gap
+
+So, by using Double LASSO, which is suggested when the average treatment effect is the main concern, we will try to look at the effect of the treatment on the differences between females and males in terms of the change in the hourly wages from 2005 to 2010. 
+
+In terms of that, we will exclude the ones that were not employed both in 2005 and 2010, and those who got a change in their employment status. So we will analyze only the individuals that were employed in both years.
+
+
+
+```{r wage-analysis, echo= FALSE}
+db2_wage <- db2[db2$emp_2005 == 1 & db2$emp_2010 == 1,]
+
+Y <- db2_wage$change_hourly_wage
+
+X <- model.matrix(~-1 + female + treat + female*treat + female:(change_tenure + change_exper + south + black + urban_2010 + educ + KWW + IQ + age + married_2005 + married_2010) +treat:(change_tenure + change_exper + south + black + urban_2010 + educ + KWW + IQ + age + married_2005 + married_2010) +(change_tenure + change_exper + south + black + urban_2010 + educ + KWW + IQ + age + married_2005 + married_2010 )^2, data = db2_wage)
+X <- X[, which(apply(X, 2, var) != 0)]
+	demean <- function (x){ x- mean(x)}
+	X <- apply(X, 2, FUN=demean)
+	
+index.dummies <- grep("female|treat", colnames(X))
+fit <- rlassoEffects(X, Y, index = index.dummies)
+
+summary(fit)
+```
+
+```{r graph_wage, echo = FALSE}
+treatment_effects <- fit$coefficients
+p_values <- fit$pval
+significance_level <- 0.05
+significant_effects <- treatment_effects[p_values < significance_level]
+conf_intervals <- confint(fit)
+df_results <- data.frame(Covariate = names(significant_effects),
+                         Treatment_Effect = significant_effects,
+                         CI_lower = conf_intervals[p_values < significance_level, 1],
+                         CI_upper = conf_intervals[p_values < significance_level, 2])
+ggplot(df_results, aes(x = Covariate, y = Treatment_Effect, color = Treatment_Effect)) +
+  geom_point() +
+  geom_pointrange(aes(ymin = CI_lower, ymax = CI_upper)) +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(title = "Significant Treatment Effects by Covariate",
+       x = "Covariate", y = "Treatment Effect")
+
+```
+
+According to our results in here, our primarily interested coefficient is female:treat interaction dummy, because like a difference in differences model, it gives the change in the hourly wage for treated females, when the general increase/decrease because of the treatment and the gender is deducted from the result. So since it is positive and statistically significant, we can conclude that treatment had a significant improvement in the inequality between hourly wages of males and females.
+
+
+
+# Treatment effect on change in unemployment
+
+Again, we will use Double Lasso, but this time, our dependent variable will be change_employment. 
+
+- change_employment = 0 if the individual did not change the employment status.
+
+- change_employment = 1 if the individual got employed during the period.
+
+- change_employment = -1 if the individual laid off during the period.
+
+First, let's look at the employment rates in 2005 and 2010:
+
+```{r unemp-table, echo = FALSE}
+emp_mean <- db2[, .(mean(emp_2005, na.rm = TRUE), mean(emp_2010, na.rm = TRUE))]
+colnames(emp_mean) <- c("2005","2010")
+emp_mean$`2005` <- paste0(sprintf("%.2f", emp_mean$`2005` * 100), "%")
+emp_mean$`2010` <- paste0(sprintf("%.2f", emp_mean$`2010` * 100), "%")
+
+print(emp_mean, header = TRUE)
+```
+
+While the employment rates are like this, let's look for if there is a statistically significant change from 2005 to 2010 in employment rates.
+
+```{r t-test, echo = FALSE}
+t.test(db2$emp_2005, db2$emp_2010, alternative = "two.sided")
+
+```
+
+Since the p-value is bigger than 0.05, we failed to reject the null hypothesis of true difference in means is equal to 0, so there is no statistically significant change in employment rates from 2005 to 2010.
+
+
+```{r unemp-analysis, echo= FALSE}
+
+Y <- db2$change_emp
+
+X <- model.matrix(~-1 + female + treat + female*treat + female:(change_tenure + change_exper + south + black + urban_2010 + educ + KWW + IQ + age + married_2005 + married_2010) +treat:(change_tenure + change_exper + south + black + urban_2010 + educ + KWW + IQ + age + married_2005 + married_2010) +(change_tenure + change_exper + south + black + urban_2010 + educ + KWW + IQ + age + married_2005 + married_2010 )^2, data = db2)
+X <- X[, which(apply(X, 2, var) != 0)]
+	demean <- function (x){ x- mean(x)}
+	X <- apply(X, 2, FUN=demean)	
+index.dummies <- grep("female|treat", colnames(X))
+fit2 <- rlassoEffects(X, Y, index = index.dummies)
+
+summary(fit2)
+```
+
+According to the results, the employment rate has slightly decreased from 2005 to 2010 and the treatment has no significant effect on the possibility of changing employment status for every individual. 
+
+
+
+
+# Comments on the expected impacts
+
+As we can see from the results, as the age in 2010 increases, in other words, as the individual is older, the effect of the treatment is decreases for both of the genders, but especially more for the females. 
+
+
+Also the effect of the treatment is less effective as the IQ level, KWW score and/or the education level increases. That means, the wage difference between individuals have high IQ scores and/or high score on a test of occupational knowledge and individuals have low scores is decreasing. Even though we can not see the coefficient of "KWW" or "IQ" right now, in some sense the policy brings down the income inequality, or slows down the increase in the income inequality.
+
+
+One of the interesting facts is that during this period, no one got married among our individuals, they have only divorced! However, we don't see any significant effect of the treatment on the divorced ones. 
+
+
+
+# Imposing the policy into Germany
+
+While commenting about the impacts of the policy in the US, we should be careful that the time interval contains the 2008 Financial Crisis. So, while the economy in 2005 was in a good shape, 2010 was right after the crisis. So the decrease in the employment rates can be due to that. However, since we don't know how the crisis affected our individuals, in all of the analysis, we assumed that the effect was homogeneous, so when we used some kind of difference in differences method, we eliminated the common effect of the crisis on the individuals. However, this is only valid under the assumption of homogeneous effect of the 2008 crisis. 
+
+Imposing this policy in Germany can have some problems as more unionized labor force in Germany. Compared to the US, the wages are determined more by the union and employee negotiations in Germany. So the impact of the policy in Germany can be less effective or slower in action.
+
+
+
+
